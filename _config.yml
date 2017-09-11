@@ -1,0 +1,9 @@
+title: Appdome's Development Blog
+email: opensource@appdome.com
+description: >
+  One place for all the truly cool tools and tips, directly from the Appdome codeless integration experts
+baseurl: ""
+url: ""
+
+# Build settings
+markdown: kramdown
