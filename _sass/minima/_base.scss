@@ -56,7 +56,10 @@ img {
   vertical-align: middle;
 }
 
-
+.post-content img {
+    margin: auto;
+    display: block;
+}
 
 /**
  * Figures
