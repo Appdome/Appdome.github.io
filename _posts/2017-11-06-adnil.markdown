@@ -1,0 +1,95 @@
+---
+layout: post
+title:  "A nil that is not a NULL"
+subtitle: "Creating a nil-like Object for Fun and Profit"
+date:   2017-11-06
+author: Lior Halphon
+---
+
+A cool feature of the Objective-C runtime is that `nil` “responds” to every selector, and always returns a value that is equivalent to `0` or `nil` itself. This feature, together with the dynamic nature of Objective-C, can be exploited to aid in research of Objective-C code, and bypassing API limitations.
+
+## Implementing ADNil
+
+The first thing we want to do is to implement an object that behaves as similar to nil as possible. To do so we must first decide what our root class is – `NSObject`, `NSProxy` or even let our class be a root class itself. For our needs, subclass `NSObject` is good enough, so we do not need to worry about implementing `+ [ADNil alloc]` and other basic methods. The tradeoff is that our `ADNil` object will respond to every `NSObject` method, potentially including categories, which depending on what we use this object for may or may not be a good thing.
+
+The next thing we need to do in our implementation is implement a method that can receive any number of parameters of any type and return `0` (or `NULL`, or `nil`, depending on what the caller expects). Since the calling convention in every Objective-C implementation allow adding extraneous parameters to any function, and the function will ignore them completely, this is actually very easy:
+
+{% highlight objc %}
+@implementation ADNil
+
+- (id) nopMethod
+{
+    return nil;
+}
+
+@end
+{% endhighlight %}
+
+The last step is getting the Objective-C runtime to call our `nopMethod` implementation whenever an unimplemented selector is used on our object.  Objective-C has several methods of resolving unrecognized selectors, with the most powerful one being `-[NSObject forwardInvocation:]`. However this method is quite an overkill for our needs, and there's an easier solution: `+[NSObject resolveInstanceMethod:]`. Basically, the Objective-C runtime calls this method if it can't find an instance method implementation in a class for a given selector. If it returns `YES`, the Objective-C runtime assumes the method has been dynamically added to the class, and tries calling it again. If it returns `NO`, it will try a different resolution or eventually fail and call `-[NSObject doesNotRecognizeSelector:]`. All we have to do is implement this method, add the nop implementation to the unrecognized selector, and return `YES`:
+
+{% highlight objc %}
++ (BOOL)resolveInstanceMethod:(SEL)sel
+{
+    class_addMethod(self, sel,
+                    [self instanceMethodForSelector:@selector(nopSelector)],
+                    "@@:");
+    return YES;
+}
+{% endhighlight %}
+
+Notice our encoded signature is `"@@:"`, which is the signature of a function returning `id`, and has two parameters: one of type `id` (`self`), and one of type `SEL` (`_cmd`). If more parameters are being passed they will be ignored thanks to the calling convention. Additionally, since all integer and pointer types are returned on the same register on all Objective-C implementations, and since we always return `0`/`nil`/`NULL` we don't need to worry about reference counting, `id` does a good job as our return type.
+
+Lastly, for the sake of completion, we'll add a sharedNil class method to return a singleton object for our class. We'll take advantage of Objective-C's associated object (with _cmd as our key) to make sure an object of the correct class is returned in case `ADNil` was sub-classed (The use of subclassing `ADNil` will be described later). Adding thread safety to this method is left as an exercise to the reader.
+
+{% highlight objc %}
++ (instancetype) sharedNil
+{
+    id singleton = objc_getAssociatedObject(self, _cmd);
+    if (singleton) return singleton;
+    singleton = [[self alloc] init];
+    objc_setAssociatedObject(self, _cmd, singleton, OBJC_ASSOCIATION_RETAIN);
+    return singleton;
+}
+{% endhighlight %}
+
+## Differences between nil and ADNil
+
+Before going on, it's important we list the differences between `nil` and `ADNil`. The most important difference is that `ADNil` is actually an object, while `nil` is not; therefore, `[ADNil sharedNil] == nil` will always yield `false`.
+
+The second important difference is that `ADNil` *does* actually respond to some selectors; specifically, any selector it inherits from `NSObject`. This may be a required thing for some selectors (For example, it would be bad if `-[ADNil retain]` would return `nil`), and confusing for others (`-[ADNil class]` returns a real class object, which responds to *less* selectors than the `Nil` class).
+
+A specific case that should be noted is that because `+[NSObject resolveInstanceMethod:]` is called before `-[NSObject respondsToSelector:]` returns, it will **always** return `YES` (where for a “real” `nil` object it would always return `NO`). If this fact is problematic for some use cases, the method can be overridden so it always returns `NO` instead.
+
+## Using ADNil
+
+The first and easiest use of `ADNil` is calling APIs that explicitly forbid the use of `nil` (Such as `NSArray` and `NSDictionary` methods). This is very similar to `NSNull` in that manner, but since it behaves like `nil`, you don't have to compare anything to it and you don't have to worry about unexpected unrecognized selectors. Replacing certain object references with `ADNil` will prevent access to that object while bypassing any `nil` checks, giving you another tool you can use to modify the behavior of others' code. This tool can be made even more powerful if you subclass `ADNil`, effectively adding “exceptions” to `nil`'s nature of always returning `0` and doing nothing else.
+
+The second use of `ADNil` is more research oriented. Because `ADNil`'s nop code is handled by an actual, user-provided function (Unlike `nil` which is handled by `objc_msgSend` directly), it can be modified to log uses of unimplemented selectors, while still behaving like `nil` in every other manner. This gives you an easy way to figure out which methods are used on a certain object or even a `nil` reference simply by replacing it with `ADNil`. This helps significantly, for example, when implementing objects that must conform to an undocumented API, and works exceptionally well when combining it with subclassing. An example usage would be:
+
+{% highlight objc %}
+@implementation ADNil
+
+- (id) nopMethod
+{
+    NSLog(@"Method call: -[ADNil %s]", sel_getName(_cmd));
+    return nil;
+}
+
+@end
+
+@implementation ADNilSubclass
+
+- (NSArray *) someKnownMethod: (id)parameter
+{
+    NSLog(@"Method call: -[ADNilSubclass someKnownMethod: %@]", parameter);
+    /* We don't have to return nil or 0 in every method, sometimes other
+       return values may serve us better in specific subclasses. */
+    return @[];
+}
+
+@end
+{% endhighlight %}
+
+## Conclusion
+
+Objective-C's dynamic nature makes it a software researcher's heaven and a tinkerer's favorite playground. Its many features can be used to significantly aid in the process of research and can make otherwise-impossible tweaks to external code easy. Make clever use of these features to improve your workflow and simplify your code!
