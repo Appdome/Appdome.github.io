@@ -4,6 +4,10 @@ description: >
   One place for all the truly cool tools and tips, directly from the Appdome codeless integration experts
 baseurl: ""
 url: ""
+host: 0.0.0.0
 
 # Build settings
 markdown: kramdown
+
+gems:
+  - jekyll-feed
