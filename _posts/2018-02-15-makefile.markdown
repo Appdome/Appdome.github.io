@@ -1,0 +1,278 @@
+---
+layout: post
+title:  "The Appdome Way of Using Make"
+subtitle: "Multi-platform Building with Make"
+date:   2018-02-15
+author: Lior Halphon
+---
+
+Appdome's build system is quite complex – it must build dozens of modules (each with its own quirks and compilation flags) on three platforms (Android and two iOS “flavors”), while avoiding code duplication and keeping development as easy as possible. In this article, we'll recreate a similar (yet simpler) `make`-based build system that can create both 64-bit dynamic libraries that runs on both macOS and iOS using a single codebase, without having to run `./configure`-like scripts or `make clean` to switch targets.
+
+## Build System Requirements
+
+For our build system, we have several requirements:
+
+ * Can compile for several targets
+   * Adding new targets should be easy
+ * It should be easy to determine which files are compiled for which target simply by looking at the file tree
+ * It should be possible to make specific files and modules only compile for specific targets
+ * It should be possible to add module-specific flags
+ * Auto `.h` dependency generation
+
+## Design
+
+Now that we have our requirements down, we can design our build system. To support several targets without having the intermediates conflict with each other, we'll save them to `build/<target>/path/to/file.c.o`. The flags (and if we ever need to, the toolchain paths) will be specified in an included `.mk` file, which will include both common and platform-specific flags. Adding a new platform target should be as easy as adding it to a platform list and adding the correct platform-specific flags.
+
+To make the source tree obvious, we'll make it so *every* source file in the repository gets compiled, so you never have to manage an ever-growing list of source files. We'll use prefixes to filter target-specific files, so files and folders starting with `ios_` won't compile and link into the macOS version, and vice-versa.
+
+To have module-specific flags, we'll define a module as a folder, and let each folder have an optional `module.mk` file that can define module-specific flags.
+
+And finally, for auto dependencies, we can use the built-in compiler features to generate `.dep` files. We will have to generate a `.dep` file per source file *per target*, because different targets can have different flags and defines that can affect dependencies.
+
+## Implementation
+
+So now we can start actually implementing our build system. In order to avoid a huge single `Makefile`, we'll split it into several smaller files:
+
+ * `Makefile` – Includes everything else and provide some basic `make` setup
+ * `utils.mk` – Defines useful `make` macros
+ * `conf.mk` – Defines defaults to build configurations, such as the build path or using optimization levels
+ * `flags.mk` – Defines both the global and the per-target compilation and linkage flags
+ * `rules.mk` – Defines the compilation rules for our source files
+ * `targets.mk` – Handles defining the correct dependencies for each platform/target
+
+Let's dive into the contents of these files!
+
+### Makefile
+
+```bash
+.PREFIXES:
+.SUFIXES:
+.SECONDARY:
+.DELETE_ON_ERROR:
+
+PLATFORMS := ios mac
+all: $(PLATFORMS)
+.PHONY: all $(PLATFORMS) clean
+
+include utils.mk
+include conf.mk
+
+# Prevent make clean from doing anything else (such as generating .dep files)
+ifneq ($(MAKECMDGOALS),clean)
+include flags.mk
+include rules.mk
+include targets.mk
+endif
+
+clean:
+-@rm -rf $(BUILD_PATH)
+```
+
+This file is pretty simple – the first few lines disable several unwanted `make` behaviors such as implicit rules. Then, we define our platforms, define `all` to build all platforms, and define all phony targets as such. Then, we include the rest of the files, and finally, define the `clean` rule.
+
+### utils.mk
+```
+CURRENT_MODULE = $(firstword $(subst /, ,$<))
+AUTO_MKDIR = @mkdir -p $(dir $@)
+FILTER_OUT = $(foreach v,$(2),$(if $(strip $(foreach word,$(1),$(findstring $(word),$(v)))),,$(v)))
+```
+
+This file is relatively simple as well:
+
+ *  `CURRENT_MODULE` operates by returning the name of the top folder of the first dependency in the current build recipe.
+ *  `AUTO_MKDIR` is a simple rule that creates the required folders for the current target.
+ *  `FILTER_OUT` is similar to the `make` built-in `filter-out`, but it filters out using substring matching instead of `make` patterns. For example, `$(call FILTER_OUT,a,Quack Duck)` will return `Duck`.
+ 
+### conf.mk
+ 
+ ```bash
+ BUILD_PATH ?= build
+ CONF ?= debug
+ USE_AUTO_DEPS ?= true
+ 
+ ifeq ($(CONF),release)
+ DEBUG := false
+ else ifeq ($(CONF),debug)
+ DEBUG := true
+ else
+ $(error Unsupported CONF value)
+ endif
+ ```
+ 
+ `conf.mk` can contain pretty much anything – debugging configuration, logging level and so on. For our example we'll have a single variable called `CONF` which can be either `release` or `debug`, and it shall enable or disable debug specific flags. Our `conf.mk` file will also set the default built path and the default value for `.dep` file generation.
+
+### flags.mk
+
+```bash
+# Set up the toolchain. For out proposes, we'll use clang as CC, CXX and LD for all
+# targets, but this can be easily modified.
+
+CC := clang
+CXX := $(CC)
+LD := $(CC)
+
+# CFLAGS   - Flags common to C and C++
+# CCFLAGS  - Extra C exclusive flags
+# CXXFLAGS - Extra C++ exclusive flags
+# CCFLAGS_ios / CXXFLAGS_ios  - Effective flags used when compiling C/++ for ios
+# CCFLAGS_mac / CXXFLAGS_mac  - Effective flags used when compiling C/++ for mac
+
+CFLAGS :=
+ifeq ($(DEBUG),true)
+CFLAGS += -g
+endif
+CFLAGS += -Wall -Wextra
+CFLAGS += -Werror
+...
+CFLAGS += -I.
+
+ifeq ($(DEBUG),false)
+CFLAGS += -DNDEBUG
+CFLAGS += -O3
+endif
+
+IOS_SYSROOT ?= $(shell xcodebuild -sdk iphoneos -version Path 2> /dev/null)
+CFLAGS_ios := $(CFLAGS)
+CFLAGS_ios += -arch arm64
+CFLAGS_ios += -DIOS_PLATFORM
+CFLAGS_ios += -isysroot $(IOS_SYSROOT)
+CFLAGS_ios += -miphoneos-version-min=9
+
+MACOS_SYSROOT ?= $(shell xcodebuild -sdk macosx -version Path 2> /dev/null)
+CFLAGS_mac := $(CFLAGS)
+CFLAGS_mac += -arch x86_64
+CFLAGS_mac += -DMAC_PLATFORM
+CFLAGS_mac += -isysroot $(MACOS_SYSROOT)
+CFLAGS_mac += -mmacosx-version-min=10.9
+
+CCFLAGS += -std=gnu11
+
+CCFLAGS_ios := $(CFLAGS_ios) $(CCFLAGS)
+CCFLAGS_mac := $(CFLAGS_mac) $(CCFLAGS)
+
+CXXFLAGS += -std=gnu++11
+CXXFLAGS += -fpermissive
+CXXFLAGS += -fno-rtti
+CXXFLAGS += -fno-exceptions
+CXXFLAGS += -stdlib=libc++
+
+CXXFLAGS_ios := $(CFLAGS_ios) $(CXXFLAGS)
+CXXFLAGS_mac := $(CFLAGS_mac) $(CXXFLAGS)
+
+LDFLAGS := -shared
+LDFLAGS += -framework Foundation
+
+ifeq ($(DEBUG),true)
+LDFLAGS += -g
+endif
+
+LDFLAGS_ios := $(LDFLAGS)
+LDFLAGS_ios += -arch arm64
+LDFLAGS_ios += -isysroot $(IOS_SYSROOT)
+LDFLAGS_ios += -miphoneos-version-min=9
+LDFLAGS_ios += -framework UIKit
+
+LDFLAGS_mac := $(LDFLAGS)
+LDFLAGS_mac += -arch x86_64
+LDFLAGS_mac += -isysroot $(MACOS_SYSROOT)
+LDFLAGS_mac += -mmacosx-version-min=10.9
+LDFLAGS_mac += -framework AppKit
+
+# Source files won't compile these targets if their names contain one or more of these strings
+SOURCE_FILTER_ios := /mac
+SOURCE_FILTER_mac := /ios
+
+TARGET_ios := $(BUILD_PATH)/bin/ios/libsomething.dylib
+TARGET_mac := $(BUILD_PATH)/bin/mac/libsomething.dylib
+```
+
+This file is a bit longer, but still quite straightforward. We specify our toolchain and various flags for each platform. Additionally, we define the `SOURCE_FILTER` and `TARGET` vars, which we'll use soon. Note that having `/mac` as the iOS `SOURCE_FILTER` will prevent pathnames containing `/mac` from compiling into iOS. This means if a file's name beings with `mac`, or is contained by a folder starting with `mac` won't compile and link into the iOS target. Same goes for the other way around.
+
+Note the difference between `CFLAGS` and `CCFLAGS` – the first applies to all C-like source files (C, Objective-C and C++) while the latter does not affect C++. (Remember that Objective-C a strict superset of C while C++ is not)
+
+### rules.mk
+
+```bash
+define DEFINE_RULES
+
+CC_INVOKE_$(1) = $$(CC) $$(CCFLAGS_$(1)) $$(CFLAGS_$$(CURRENT_MODULE)) $$(CCFLAGS_$$(CURRENT_MODULE)) $$(CFLAGS_$$(CURRENT_MODULE)_$(1)) $$(CCFLAGS_$$(CURRENT_MODULE)_$(1)) -DCURRENT_MODULE=$$(CURRENT_MODULE)
+CXX_INVOKE_$(1) = $$(CXX) $$(CXXFLAGS_$(1)) $$(CFLAGS_$$(CURRENT_MODULE)) $$(CXXFLAGS_$$(CURRENT_MODULE)) $$(CFLAGS_$$(CURRENT_MODULE)_$(1)) $$(CXXFLAGS_$$(CURRENT_MODULE)_$(1)) -DCURRENT_MODULE=$$(CURRENT_MODULE)
+
+$$(BUILD_PATH)/obj/$(1)/%.m.o: %.m
+    $$(AUTO_MKDIR)
+    $$(CC_INVOKE_$(1)) -fobjc-arc -c -o $$@ $$<
+
+$$(BUILD_PATH)/obj/$(1)/%.cpp.o: %.cpp
+    $$(AUTO_MKDIR)
+    $$(CXX_INVOKE_$(1)) -c -o $$@ $$<
+
+$$(BUILD_PATH)/obj/$(1)/%.c.o: %.c
+    $$(AUTO_MKDIR)
+    $$(CC_INVOKE_$(1)) -c -o $$@ $$<
+
+$$(BUILD_PATH)/obj/$(1)/%.cpp.dep: %.cpp
+    $$(AUTO_MKDIR)
+    @$$(CXX_INVOKE_$(1)) -Wno-#warnings -MT $$(@:.dep=.o) -M $$^ -o $$@
+
+$$(BUILD_PATH)/obj/$(1)/%.dep: %
+    $$(AUTO_MKDIR)
+    @$$(CC_INVOKE_$(1)) -Wno-#warnings -MT $$(@:.dep=.o) -M $$^ -o $$@
+
+$$(TARGET_$(1)):
+    $$(AUTO_MKDIR)
+    $$(LD) $$(LDFLAGS_$(1)) $$^ -o $$@
+
+endef
+
+$(foreach i,$(PLATFORMS),$(eval $(call DEFINE_RULES,$(i))))
+```
+
+Now we have to define rules for our source files. Because compilation and linkage flags vary between targets, we have to define our rules per target, but in order to avoid code duplication, we'll use a macro. Note that we use `$$` instead of `$` inside our macro (except for `$(1)`) to avoid premature variable/macro expansion.
+
+The first thing we do inside the macro is define the target's `CC_INVOKE` and `CXX_INVOKE` macros, as we're going to use those invocations more than once each. Note how we use non-constant variable names to allow per-platform, per-target, and per-target-per-platform flags. For example:
+
+ *  `$$(CCFLAGS_$(1))` will expand to `$(CFLAGS_ios)` during an iOS compilation invocation, which will eventually expand to the (Objective-) C compilation flags for iOS.
+ *  `$$(CFLAGS_$$(CURRENT_MODULE))` will expand to `$(CFLAGS_mymodule)` during a compilation invocation for a file under a folder called `mymodule`. This allows `mymodule/module.mk` to define that variable to set module-specific (but not platform-specific) flags for all its source files.
+ *  `$$(CXXFLAGS_$$(CURRENT_MODULE)_$(1))` will expand to `$(CXXFLAGS_mymodule_mac)` during a macOS compilation invocation for a file under a folder called `mymodule`. This allows `mymodule/module.mk` to define that variable to set module-specific *and* platform-specific flags for its C++ files.
+ 
+With these macros done, the rest of the macro is just straightforward pattern rule definitions, including rules for our `.dep` files.
+
+Finally, we use `foreach` to run our macro for each of our targets.
+
+The way this file is written makes it easy to add support for more source file types, such as assembly, Objective-C++ and pre-proccessed source files.
+
+### targets.mk
+
+```bash
+define HANDLE_PLATFORM
+
+OBJECTS_$(1) += $$(addsuffix .o,$$(addprefix $(BUILD_PATH)/obj/$(1)/,$$(call FILTER_OUT,$$(SOURCE_FILTER_$(1)), $$(SOURCES))))
+
+$$(TARGET_$(1)): $$(OBJECTS_$(1))
+
+$(1): $$(TARGET_$(1))
+
+ifeq ($(USE_AUTO_DEPS),true)
+-include $$(patsubst %.o,%.dep,$$(OBJECTS_$(1)))
+endif
+
+endef
+
+SOURCES := $(shell find * -type f -name "*.c" -o -name "*.cpp" -o -name "*.m")
+
+-include $(addsuffix module.mk,$(shell echo */))
+
+$(foreach i,$(PLATFORMS),$(eval $(call HANDLE_PLATFORM,$(i))))
+```
+
+The last file is responsible to set the targets actual object dependencies for each platform. We first find all sources in our tree (We use `find *` instead of `find .` to avoid avoid searching folders such as `.git`), and then include all `module.mk` files (We use `-include` to keep those optional). Then, for each platform, we run the `HANDLE_PLATFORM` macro.
+
+The `HANDLE_PLATFORM` macro takes the source list, filters it out using the correct `SOURCE_FILTER` variable defined in `flags.mk`, and adds a suffix and prefix to each file to generate an actual object list. Finally, we set the list as the dependencies for our target.
+
+After we configure the target's dependencies, since we already have a list of the required objects, we use the opportunity include the relevant `.dep` files (which will generate them if they don't exist) if `USE_AUTO_DEPS` is enabled.
+
+## Example Usage
+
+Now our build system is ready to be used! As an example, we'll create a dynamic library for both iOS and macOS whose sole purpose is to show a popup once it's `dlopen`ed. We'll have 2 modules for this library – `popup`, which include platform specifc code for showing the popup, and `init`, which calls the platform-specific code using a common API from an `__attribute__((constructor))` function. The texts used for the popup will be determined by `#define`d strings originating from `init`'s `module.mk` file.
+
+[Download the full code and example](/assets/make_example.zip)
