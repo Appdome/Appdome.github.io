@@ -14,9 +14,9 @@ I would like to share with you such an experience, and the subject of lock-free 
 
 While coding a certain feature in the infrastructure of the appdome engine, I realized I'm going to need to store certain data per thread.
 
-A quick google search revealed that GCC supports the `__thread` keyword which specified that the variable is to be stored in each thread's context. However, upon further examination, the implementation of this feature is quite involved in the aspect of runtime, using `malloc(3)` to put the data in the heap, and store the pointer in the top of the thread's stack (in the TLS=Thread-Local-Storage). This use of `malloc` disqualified this feature since `malloc` employs a global mutex, and I needed to be able to access this data from each thread independently without the fear of causing a deadlock.
+A quick google search revealed that GCC supports the `__thread` keyword which specified that the variable is to be stored in each thread's context. However, upon further examination, the implementation of this feature is quite involved in the aspect of runtime, using `malloc(3)` to put the data in the heap, and store the pointer in the top of the thread's stack (in the TLS=Thread-Local-Storage).
 
-So the next candidate was obviously using the aforementioned TLS. Accessing the TLS is possible using the `pthread_setspecific(3)` and `pthread_getspecific(3)` API:
+Another option is to use the aforementioned TLS. Accessing the TLS is possible using the `pthread_setspecific(3)` and `pthread_getspecific(3)` API:
 ```c
 void *pthread_getspecific(pthread_key_t key);
 int pthread_setspecific(pthread_key_t key, const void *value);
@@ -29,38 +29,9 @@ int pthread_key_create(pthread_key_t *key, void (*destructor)(void*));
 
 Which enables assigning a destructor function to the key. This way, arbitrary local storage can be assigned by `mmap`-ing and storing the pointer, and then `munmap`-ing in the destructor.
 
-This is actually the solution which we ended up selecting, but at the time, I was very concerned with what would happen if the `pthread_key_create` function fails to find a vacant slot in the thread's TLS. I wanted to be certain that my data can always be stored locally.
+There is of course another way, and that is to use a *lock-free hash-table*.
 
-Since the TID on Linux (and therefore Android) is a `pid_t`, I deduced that it must be 16bit wide, with a maximal TID of `32768` (if we ignore the "illegal" values). So All I had to do is allocate my own static array of TLS slots, each one pointer wide:
-```c
-static uintptr_t TLS[MAX_TID + 1] = {0};
-```
-
-Then supply setters and getters which utilize the TID:
-```c
-uintptr_t tls_get(void)
-{
-    return TLS[syscall(__NR_gettid)];
-}
-
-void tls_set(uintptr_t value)
-{
-    TLS[syscall(__NR_gettid)] = value;
-}
-```
-
-That was easy enough, however, on iOS, I had to face the problem of not having such a compact thread identifier. The closest you can get is `mach_thread_self` which returns what is eventually an `unsigned int`, that is 32bit wide. This is clearly way to much too allocate an array (`sizeof(uintptr_t) * UINT_MAX` = 32GiB).
-
-To summarize all the requirements, I need a:
-+ Sparse data structure
-+ With access to data based on a key which is the TID (or MACH port)
-+ And I do not want to rely on any implementation which uses locks
-
-This sounds exactly like a *lock free hash table*.
-
-After poking around, it seems like lock-free hash-tables are implemented as buckets of lock-free linked-lists.
-
-Which brings us to the topic of the article.
+And as there is no easy way to describe how lock-free hash-tables work, I will follow the progression of linked-lists, then lock-free linked-lists, and then lock-free hash-tables. This will also give me the opportunity of exploring what *lock-free* means and derive some of the properties of such algorithms and data-structures.
 
 ## Linked Lists 101
 
@@ -452,7 +423,7 @@ insert_sorted_with_cas = [
 ```
 Let's see the simulation results.
 
-![Three parallel sorted inserts with faulty CAS](/assets/lockfreelist-sorted_insert_with_faulty_cas.png)
+![Three parallel sorted inserts with faulty CAS](/assets/lockfree-list-intro/lockfreelist-sorted_insert_with_faulty_cas.png)
 
 Huh?! What happened here?
 
