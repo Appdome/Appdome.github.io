@@ -77,7 +77,7 @@ Again we have a classic duplicate symbol mistake – someone moved a function (`
 
 ## Missing Symbols
 
-To the next pitfall! Remember that when linking `.a` files, the linker only links the `.o` that are actually used? Well, the thing is, the linker isn't very good at this. It will fail detect `dlsym` usage and most indirect ways of obtaining addresses, and with very dynamic languages such as Objective-C they are very common. These could result in random linkage errors for the library's users. For similar reasons, archive files are largely incompatible with multi-stage linking (`ld -r`), as the removal of seemingly unused object files happen prematurely.
+To the next pitfall! Remember that when linking `.a` files, the linker only links the `.o` that are actually used? Well, the thing is, the linker isn't very good at this. It will fail to detect `dlsym` usage and most indirect ways of obtaining addresses, and with very dynamic languages such as Objective-C they are very common. These could result in random linkage errors for the library's users. For similar reasons, archive files are largely incompatible with multi-stage linking (`ld -r`), as the removal of seemingly unused object files happen prematurely.
 
 ## Duplicate Filenames
 
