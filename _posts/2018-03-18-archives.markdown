@@ -85,7 +85,7 @@ While not a very common issue, managing the contents of `.a` files using `ar` (i
 
 ## Not Very Effective
 
-As mentioned before, archive files do not work very neatly with highly dynamic runtimes such as Objective-C's, making the size optimization made by the use of archive files not very effective when using such languages. But even if such languages aren't used in the library, this kind of optimization was “invented” in times were disk space was at premium, and every single byte counted. These days, not only size optimization is rarely relevant, the space saved by this specific optimization is so insignificant when compared to other non-code resources (Such as graphics) bundled with software products these days, making this optimization completely irrelevant.
+As mentioned before, archive files do not work very neatly with highly dynamic runtimes such as Objective-C's, making the size optimization made by the use of archive files not very effective when using such languages. But even if such languages aren't used in the library, this kind of optimization was “invented” in times were storage space was small and expensive, and every single byte counted. These days, not only size optimization is rarely relevant, the space saved by this specific optimization is so insignificant when compared to other non-code resources (Such as graphics) bundled with software products these days, making this optimization completely irrelevant.
 
 ## Conclusion
 
