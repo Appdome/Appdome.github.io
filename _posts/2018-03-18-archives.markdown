@@ -10,7 +10,7 @@ Archive (`.a`) files are commonly used as the file format of choice when creatin
 
 ## About Archive Files
 
-As the name implies, archive files are uncompressed archives of object (`.o`) files, kind of like a `tar` archive of `.o` files. The idea behind this is quite simple – instead of compiling all `.c` files to one big `.o` file that will eventually be linked into the executable, compile each `.c` file into an `.o` file and let the linker choose which of them will go into the main executable. This lets the final executable smaller by only linking actually used imports. However, things are not that simple, and this seemingly harmless technique can lead to obscure bugs.
+As the name implies, archive files are uncompressed archives of object (`.o`) files, kind of like a `tar` archive of `.o` files. The idea behind this is quite simple – instead of compiling all `.c` files to one big `.o` file that will eventually be linked into the executable, compile each `.c` file into an `.o` file and let the linker choose which of them will go into the main executable. This lets the final executable remain smaller by only linking actually used imports. However, things are not that simple, and this seemingly harmless technique can lead to obscure bugs.
 
 ## Link Errors
 
