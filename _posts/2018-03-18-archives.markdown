@@ -1,0 +1,92 @@
+---
+layout: post
+title:  "PSA: Stop Creating .a Files"
+subtitle: "“Archive Files Considered Harmful”"
+date:   2018-03-18
+author: Lior Halphon
+---
+
+Archive (`.a`) files are commonly used as the file format of choice when creating statically linked libraries. However, archive files have many pitfalls by design and are usually not worth the trouble when compared to plain object (`.o`) files.
+
+## About Archive Files
+
+As the name implies, archive files are uncompressed archives of object (`.o`) files, kind of like a `tar` archive of `.o` files. The idea behind this is quite simple – instead of compiling all `.c` files to one big `.o` file that will eventually be linked into the executable, compile each `.c` file into an `.o` file and let the linker choose which of them will go into the main executable. This lets the final executable smaller by only linking actually used imports. However, things are not that simple, and this seemingly harmless technique can lead to obscure bugs.
+
+## Link Errors
+
+Because of this design, creating a static library as an `.a` file does not require any linking. This means any mistake that would normally result in a linkage error will not happen during library creation time; instead, it will only happen when the library is _used_ (and the user might not even be the creator of the library). To make things even worse, since not all “internal” `.o` files are linked into every executable, the error might differ between different use cases.
+
+For example, let's assume we have two `.o` files compiled from C files `a.c` and `b.c` and archived into an `.a` file:
+
+```c
+/* a.c */
+
+char buffer[1000];
+
+char *get_a_buffer(void)
+{
+    return &buffer[0];
+}
+
+/* b.c */
+
+char buffer[1000];
+
+char *get_b_buffer(void)
+{
+    return &buffer[0];
+}
+```
+
+The obvious mistake here is the missing `static` keyword before the two `buffer` definitions, and it would result in a duplicate symbol error for `buffer` in normal circumstances. But with an `.a` file, it would link correctly unless you use both `get_a_buffer` *and* `get_b_buffer`.
+
+Take another example:
+
+```c
+/* a.c */
+
+void foo(void)
+{
+    printf("old foo\n");
+}
+
+void bar(void)
+{
+    printf("bar\n");
+}
+
+/* b.c */
+
+void foo(void)
+{
+    printf("new foo\n");
+}
+
+void baz(void)
+{
+    printf("baz\n");
+}
+```
+
+Again we have a classic duplicate symbol mistake – someone moved a function (`foo`) from one file to another, but forgot to remove the old copy. Meanwhile, the new copy has been updated. Under normal circumstances, it would always result in a link error. With an `.a` file, there are several possible outcomes, assuming `foo` is used:
+
+ * If neither `bar` or `baz` are used, no linkage error occurs. The actual version of `foo` used is undefined.
+ * If only `bar` is used, the result is undefined. It will either use the old version of `foo`, or fail with a linkage error.
+ * If only `baz` is used, the result is undefined. It will either use the new version of `foo`, or fail with a linkage error.
+ * If both `bar` and `baz` are used, a linkage error will occur
+
+## Missing Symbols
+
+To the next pitfall! Remember that when linking `.a` files, the linker only links the `.o` that are actually used? Well, the thing is, the linker isn't very good at this. It will fail detect `dlsym` usage and most indirect ways of obtaining addresses, and with very dynamic languages such as Objective-C they are very common. These could result in random linkage errors for the library's users. For similar reasons, archive files are largely incompatible with multi-stage linking (`ld -r`), as the removal of seemingly unused object files happen prematurely.
+
+## Duplicate Filenames
+
+While not a very common issue, managing the contents of `.a` files using `ar` (in contrast to just linking against them) might be tricky due to limitations of the format. Archive files are flat, and cannot contain directories. However, they do, unfortunately, allow duplicate filenames. Duplicate file names are not entirely uncommon; for example you can have the two files `module_a/init.o` and `module_b/init.o`. Not only can this cause ambiguity in linkage error message, it also makes several seemingly trivial tasks, such as extracting a specific file using `ar` unexpectedly difficult.
+
+## Not Very Effective
+
+As mentioned before, archive files do not work very neatly with highly dynamic runtimes such as Objective-C's, making the size optimization made by the use of archive files not very effective when using such languages. But even if such languages aren't used in the library, this kind of optimization was “invented” in times were disk space was at premium, and every single byte counted. These days, not only size optimization is rarely relevant, the space saved by this specific optimization is so insignificant when compared to other non-code resources (Such as graphics) bundled with software products these days, making this optimization completely irrelevant.
+
+## Conclusion
+
+Nowadays there is pretty much no reason to use archive files. Save the troubles and catch linkage errors and bugs early by simply using `ld -r` to merge several object files to one single file.
