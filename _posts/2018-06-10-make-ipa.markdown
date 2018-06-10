@@ -1,0 +1,316 @@
+---
+layout: post
+title:  "make ipa"
+subtitle: "Building an iOS Application without Xcode"
+date:   2018-06-10
+author: Lior Halphon
+---
+
+Ever wanted to build an iOS app, but you're not a big fan of Xcode? Would you like to know what on earth is the black magic that makes your code into an iOS application? Well, you've come to the right place.
+
+## What is an IPA
+
+An IPA file is basically a zip file with the following structure:
+```
+Application.ipa
+└── Payload
+    └── Application.app
+        ├── Application (executable)
+        └── Other files...
+```
+
+So, suppose we have an executable, creating a basic iOS application is as simple as:
+```bash
+mkdir -p Payload/Application.app
+cp Application Payload/Application.app/
+zip -qr Application.ipa Payload
+```
+
+Actually, before zipping, we need to sign the application:
+```bash
+codesign -s "YOUR SIGNING IDENTITY" Payload/Application.app
+```
+
+If you don't know what `YOUR SIGNING IDENTITY` is, you can find the available ones using:
+```bash
+security find-identity -v -p codesigning
+```
+
+## The Bare Minimum
+
+A basic iOS application executable is just a regular executable with a `main` function:
+```c
+/* main.c */
+int main(int argc, char *argv[])
+{
+    return 0;
+}
+```
+
+You might be tempted to compile this using:
+```bash
+clang -o Application main.c
+```
+
+But you will be wrong. This is actually slightly more involved than that.
++ We are on a Mac, which uses an x86 CPU. We want to compile for an iPhone, which is most commonly an arm64 machine. This means we need to specify the target architecture:
+
+  `-arch arm64`
+
++ Since we are compiling for a different platform, it may have different headers and libraries. We need to tell the compiler where to look for those headers, and where to find the libraries so it can link against them. This is called the `sysroot`, and is commonly found in:
+
+  `/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk`
+
+  If you can't find anything in that path, you can ask Xcode to point you using:
+
+  `xcodebuild -sdk iphoneos -version Path`
+
+  We tell clang where the sysroot is using:
+
+  `-isysroot $(PATH_TO_SYSROOT)`
+
+Combined together, we have this _huge_ compiler invocation (using multi-line notation for readability):
+```bash
+clang                                                   \
+    -isysroot $(xcodebuild -sdk iphoneos -version Path) \
+    -arch arm64                                         \
+    -o Application                                      \
+    main.c
+```
+
+This is getting complicated already, so let's make our lives a bit easier by using a `Makefile`:
+```make
+SYSROOT := $(shell xcodebuild -sdk iphoneos -version Path 2>/dev/null)
+
+CFLAGS :=
+CFLAGS += -isysroot $(SYSROOT)
+CFLAGS += -arch arm64
+
+SOURCES := main.c
+
+OBJECTS := $(addsuffix .o,$(SOURCES))
+
+.PHONY: all
+all: Application
+
+Application: $(OBJECTS)
+    clang $(CFLAGS) -o $@ $^
+
+%.c.o: %.c
+    clang $(CFLAGS) -c -o $@ $<
+```
+
+Is that it?
+
+### info.plist
+
+If we try installing this application on an iPhone it will fail.
+
+Here are the relevant log lines (cut down to just the interesting parts):
+```
+lsd Sending applicationInstallsDidStart: for <private>
+...
+mobile_installation_proxy ... Beginning installation for file:///.../Application.ipa/ with options {
+    AllowInstallLocalProvisioned = 1;
+    IsUserInitiated = 1;
+    PackageType = Customer;
+}
+...
+installd ... Failed to load Info.plist from bundle at path /.../Application.app
+...
+lsd ... MobileInstallation returned nil for file:///.../Application.ipa/
+mobile_installation_proxy ... handle_install: Installation failed: ...
+```
+
+As you can see, the installation failed because there is missing metadata in the package: the `info.plist` file. `plist`, or [Property List](https://en.wikipedia.org/wiki/Property_list) files, are commonly used in Apple platform to store information such as metadata or user preferences. They are most commonly in a binary format these days, but they can also come in XML format. A third, JSON-based format also exists, but it's almost never used.
+
+Apple has a [documentation](https://developer.apple.com/library/content/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html#//apple_ref/doc/uid/20001431-101909) of available `info.plist` keys. Let's create a very basic `info.plist` that only contains required keys:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>Application</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.example.Application</string>
+    <key>CFBundleName</key>
+    <string>Application</string>
+</dict>
+</plist>
+```
+
+### Entitlements and Mobile-Provisioning-Profile
+
+If we try installing now, we will fail once again. This time, this line would appear in the log:
+```
+installd ... Application is missing the application-identifier entitlement.
+```
+
+This is because our application lacks a code signature, and therefore also lacks any entitlements. Specifically, it lacks the required `application-identifier` entitlement. This can be specified by an `entitlements.plist` file, which in its basic form should contain:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>application-identifier</key>
+    <string>YOUT_TEAM_ID.YOUR_APPLICATION_IDENTIFIER</string>
+</dict>
+</plist>
+```
+
+If you are a registered Apple developer, you can get `YOUR TEAM ID` and `YOUR APPLICATION IDENTIFIER` from [your developer console](https://developer.apple.com).
+
+Then, we need to embed the entitlements in the executable file. We do it by passing the `entitlements.plist` to `codesign`'s `--entitlements` option:
+```bash
+codesign                                \
+    -s "YOUR SIGNING IDENTITY"          \
+    --entitlements entitlements.plist   \
+    Payload/Application.app
+```
+
+Next, we need another set of rights, namely, a provisioning profile. The short explanation is that as a developer, you can only install your application on a limited set of devices (so you won't distribute an application without Apple's approval). So, unless you published your application to the App Store (or acquired an enterprise code signature), you need to equip your application with a provisioning profile. The provisioning profile is also a plist file, and once again you can get it from [your developer console](https://developer.apple.com).
+
+Binding it to the application is simple, just copy it to the `.app` directory:
+```
+cp embedded.mobileprovision Payload/Application.app
+```
+
+Just make sure that the contents of the provisioning profile's `<key>Entitlements</key>` matches your `entitlements.plist` (i.e. you don't use entitlements your provision profile does not approve of).
+
+All in all, our `Makefile` should now look like this:
+```make
+SYSROOT := $(shell xcodebuild -sdk iphoneos -version Path 2>/dev/null)
+
+CFLAGS :=
+CFLAGS += -isysroot $(SYSROOT)
+CFLAGS += -arch arm64
+
+SOURCES := main.c
+
+OBJECTS := $(addsuffix .o,$(SOURCES))
+
+.PHONY: all
+all: Application.ipa
+
+Application.ipa: Application Info.plist embedded.mobileprovision
+    mkdir -p Payload/Application.app
+    cp $^ Payload/Application.app
+    codesign                                \
+        -s "YOUR SIGNING IDENTITY"          \
+        --entitlements entitlements.plist   \
+        Payload/Application.app
+    zip -qr $@ Payload
+
+Application: $(OBJECTS)
+    clang $(CFLAGS) -o $@ $^
+
+%.c.o: %.c
+    clang $(CFLAGS) -c -o $@ $<
+```
+
+Great, so we have an app, and it even installs; but all it does it launch and then exit immediately.
+
+## Make it an actual App
+
+To make our application an iOS UI application, the first step is to invoke `UIApplicationMain`. This requires us to switch from C to Objective-C:
+```objc
+/* main.c -> main.m */
+#include <UIKit/UIKit.h>
+
+@interface AppDelegate: UIResponder <UIApplicationDelegate>
+@end
+
+@implementation AppDelegate
+@end
+
+int main(int argc, char *argv[])
+{
+    @autoreleasepool {
+        return UIApplicationMain(argc,
+                                 argv,
+                                 nil,
+                                 NSStringFromClass([AppDelegate class]));
+    }
+}
+```
+
+And we need to update the `Makefile`:
+```make
+...
+CFLAGS += -fobjc-arc # We want to use ARC in our Obj-C code
+
+LDFLAGS :=
+LDFLAGS += -lobjc
+LDFLAGS += -framework Foundation
+LDFLAGS += -framework UIKit
+
+Application: $(OBJECTS)
+    clang $(CFLAGS) $(LDFLAGS) -o $@ $^
+
+%.m.o: %.m
+    clang $(CFLAGS) -c -o $@ $<
+...
+```
+
+### AppDelegate
+
+The `AppDelegate` is a delegate object that handles app life-cycle related events, such as the app being launched or becoming inactive. Before adding code, let's move some stuff around, starting with the `AppDelegate` class getting its own files:
+```objc
+/* AppDelegate.h */
+#include <UIKit/UIKit.h>
+
+@interface AppDelegate: UIResponder <UIApplicationDelegate>
+@end
+
+/* AppDelegate.m */
+
+#include <Foundation/Foundation.h>
+
+#include "AppDelegate.h"
+
+@interface AppDelegate ()
+@end
+
+@implementation AppDelegate
+
+- (BOOL)application:(UIApplication *)application
+didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
+{
+    return YES;
+}
+
+@end
+```
+
+And in the `Makefile` we just need to update the source file list:
+```make
+SOURCES += AppDelegate.m
+```
+
+### Creating a Visible Window
+
+Finally we can create a UIWindow with a  UIViewController, so we have something to show:
+```objc
+@implementation AppDelegate
+{
+    /* We must retain a reference to our window to keep it visible */
+    UIWindow *window;
+}
+
+- (BOOL)application:(UIApplication *)application
+didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
+{
+    CGRect screen = [[UIScreen mainScreen] bounds];
+    window = [[UIWindow alloc] initWithFrame:screen];
+    window.rootViewController = [[UIViewController alloc] init];
+    window.backgroundColor = [UIColor whiteColor]; /* Give the window a non-transparent background */
+    [window makeKeyAndVisible];
+    return YES;
+}
+@end
+```
+
+## Download Example
+
+There a more things that we can (and need to) do to make our app actually functional, like adding an icon or make it not use iPhone 4's resolution, but this is quite good for such a few lines of code. You can [download the full example](/assets/make_ipa.zip) and use it as a skeleton for your next app!
